@@ -1,0 +1,28 @@
+CompileFlags:
+  Add:
+    - --target=x86_64-pc-windows-msvc
+    - -std=c++17
+    - -I
+    - include
+    - -I
+    - src
+    - -I
+    - C:/Program Files/NVIDIA GPU Computing Toolkit/CUDA/v13.3/include
+    - -I
+    - C:/Program Files/NVIDIA GPU Computing Toolkit/CUDA/v13.3/include/cccl
+    - --cuda-path=C:/Program Files/NVIDIA GPU Computing Toolkit/CUDA/v13.3
+    - -I
+    - C:/Program Files/Microsoft Visual Studio/2022/Community/VC/Tools/MSVC/14.44.35207/include
+    - -I
+    - C:/Program Files (x86)/Windows Kits/10/Include/10.0.26100.0/ucrt
+    - -I
+    - C:/Program Files (x86)/Windows Kits/10/Include/10.0.26100.0/um
+    - -I
+    - C:/Program Files (x86)/Windows Kits/10/Include/10.0.26100.0/shared
+---
+If:
+  PathMatch: .*\.(cu|cuh)$
+CompileFlags:
+  Add:
+    - -xcuda
+    - --cuda-gpu-arch=sm_89

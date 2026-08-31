@@ -1,0 +1,46 @@
+{
+  "clangd.fallbackFlags": [
+    "-std=c++17",
+    "-I${workspaceFolder}/include",
+    "-I${workspaceFolder}/src",
+    "-IC:/Program Files/NVIDIA GPU Computing Toolkit/CUDA/v13.3/include",
+    "-IC:/Program Files/NVIDIA GPU Computing Toolkit/CUDA/v13.3/include/cccl",
+    "-IC:/Program Files/Microsoft Visual Studio/2022/Community/VC/Tools/MSVC/14.44.35207/include",
+    "-IC:/Program Files (x86)/Windows Kits/10/Include/10.0.26100.0/ucrt",
+    "-IC:/Program Files (x86)/Windows Kits/10/Include/10.0.26100.0/um",
+    "-IC:/Program Files (x86)/Windows Kits/10/Include/10.0.26100.0/shared"
+  ],
+  "clangd.arguments": [
+    "--background-index",
+    "--header-insertion=never"
+  ],
+  "files.associations": {
+    "*.cu": "cpp",
+    "*.cuh": "cpp",
+    "*.hpp": "cpp"
+  },
+  "[cpp]": {
+    "editor.defaultFormatter": "llvm-vs-code-extensions.vscode-clangd"
+  },
+  "[c]": {
+    "editor.defaultFormatter": "llvm-vs-code-extensions.vscode-clangd"
+  },
+  "terminal.integrated.profiles.windows": {
+    "VS 2022 x64": {
+      "source": "PowerShell",
+      "args": [
+        "-NoExit",
+        "-Command",
+        "& 'C:\\Program Files\\Microsoft Visual Studio\\2022\\Community\\Common7\\Tools\\Launch-VsDevShell.ps1' -Arch amd64 -SkipAutomaticLocation"
+      ]
+    },
+    "VS 2022 x64 (cmd)": {
+      "path": "C:\\Windows\\System32\\cmd.exe",
+      "args": [
+        "/k",
+        "C:\\Program Files\\Microsoft Visual Studio\\2022\\Community\\VC\\Auxiliary\\Build\\vcvars64.bat"
+      ]
+    }
+  },
+  "terminal.integrated.defaultProfile.windows": "VS 2022 x64"
+}

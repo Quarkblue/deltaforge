@@ -1,0 +1,12 @@
+# model files
+model/
+
+# build directory
+build/
+
+# test files
+test.*
+
+# executable files
+*.exe
+*.obj

@@ -29,16 +29,24 @@ phases, not cut features.
 - **Hardware:** RTX 4060 Laptop, compute capability **8.9**, ~8 GB VRAM.
 - **Toolchain:** CUDA 13.3, MSVC 19.44, CMake (VS 2022 gen). Build flags live in
   `CMakeLists.txt` (`sm_89`, C++17, `/Zc:preprocessor`, links `CUDA::cublas`).
+- **Repo layout:** `D:\AI\Inferencing\deltaforge` (git). C++ in `include/*.hpp` +
+  `src/`; Python reference/harness in `python/` (`.venv`, `reference.py`);
+  weights in `model/Qwen3.5-2B/`; briefs in `docs/sessions/`.
 
 ### Architecture — language model
 - hidden **2048**, intermediate **6144** (SwiGLU), **24 layers**, vocab **248320**.
-- Norm: **RMSNorm**, eps 1e-6. **`lm_head` is TIED** → not on disk, reuse `embed_tokens`.
+- Norm: **RMSNorm**, eps 1e-6, **zero-centered: scale = `(1 + weight)`** (param stored as
+  delta-from-1, Gemma-style). Applies to input/post-attn norms, q_norm, k_norm, final norm.
+  **Exception:** `linear_attn.norm` is `RMSNormGated` — plain `weight` (init 1), F32, times
+  `silu(gate)`. **`lm_head` is TIED** → not on disk, reuse `embed_tokens`.
 - Layer types alternate: **full-attention at [3,7,11,15,19,23]** (6 layers),
   the other **18 are GatedDeltaNet** (linear-attention / SSM).
 - Full-attn: GQA, **8 Q heads / 2 KV heads**, head_dim 256; **q_proj[4096,2048]**
-  (gated — `attn_output_gate: true`, emits q + gate), k/v_proj[512,2048],
-  o_proj[2048,2048]; per-head QK-RMSNorm over 256; RoPE
-  (theta 1e7, partial_rotary 0.25).
+  (gated — `attn_output_gate: true`; output viewed as [heads, 512] then chunked →
+  **per-head** q[:256] + gate[256:], NOT first-half/second-half), k/v_proj[512,2048],
+  o_proj[2048,2048]; per-head QK-RMSNorm over 256 (zero-centered); RoPE
+  (theta 1e7, partial_rotary 0.25 → **rotary dim 64** of 256, rotate_half style,
+  remaining 192 pass through); scale 1/16; `attn_out * sigmoid(gate)` before o_proj.
 - GatedDeltaNet (16 heads, head_dim 128): in_proj_qkv[6144,2048],
   conv1d[6144,1,4] (depthwise, causal), in_proj_a/b[16,2048], A_log[16]F32,
   dt_bias[16], in_proj_z[2048,2048], norm[128]F32 (gated), out_proj[2048,2048].
@@ -61,8 +69,9 @@ Status: [ ] todo  [~] in progress  [x] done
 - [~] **P0. Setup** — CUDA/nvcc/CMake build working. (done: vectorAdd runs)
 - [x] **P1. Model loading** — mmap, safetensors header parse, weight registry
       (632 → typed LM/vision/MTP views), single-slab GPU upload. `dump()` + self-checks.
-- [ ] **P2. Decoder backbone (NumPy ref first)** — embedding, RMSNorm, linear/GEMM,
+- [~] **P2. Decoder backbone (NumPy ref first)** — embedding, RMSNorm, linear/GEMM,
       attention, GQA, RoPE, QK-norm, SwiGLU, final norm + tied head, KV cache, greedy sampling.
+      (slice 1 done: embed + RMSNorm + tied head + harness. next: attention.)
 - [ ] **P3. GatedDeltaNet layers** — linear attention → SSM/Mamba2 → gated delta rule.
 - [ ] **P4. Full LM NumPy forward matches HF logits (~1e-3).**  ← text bring-up milestone
 - [ ] **P5. CUDA port of the LM** — kernels per op, cuBLAS for GEMMs. First runnable text gen.
@@ -80,6 +89,8 @@ Status: [ ] todo  [~] in progress  [x] done
 |------|---------|-----------------|
 | 2026-08-26 | setup + loader | Build toolchain, RAII mmap wrapper, safetensors header parse, full weight catalogue (58 roles) derived. Started weight-mapping brief. |
 | 2026-08-31 | 00 weight mapping | **P1 done.** `Model` class: registry (632 `TensorView`), single-slab GPU upload (4.236 GiB, ~564 KB overhead, round-trip exact), typed LM+vision+MTP views, `dump()`. All 632 tensors claimed exactly once; ctor-time self-checks pass. Corrected q_proj→[4096,2048], size→GiB. Next: P2 backbone (NumPy-vs-HF). |
+| 2026-09-01 | housekeeping | Repo renamed `start-inferencing` → **`deltaforge`**, `git init` + first commit (`2bf0182`). P1 code split out of `main.cpp` into `include/{mapped_file,tensor_view,dtype,model_types,model}.hpp` (+ vendored `json.hpp`); `src/main.cpp` is now just GPU probe + `Model` ctor/selfCheck/dump. `src/kernel.cu` empty placeholder. No P2 work yet. |
+| 2026-09-03 | 01 embed/RMSNorm/head | **P2 slice 1 done.** `python/harness.py`: NumPy-vs-HF harness (`load_raw`/`load_hf`(cached fp32 CPU)/`compare`) + ops `embed`, `rmsnorm`, `tied_head`. All 5 tasks pass — embed & RMSNorm bit-exact, head 1.6e-6, tie proven by shared `data_ptr`. **Trap found:** `Qwen3_5RMSNorm` is zero-centered (`1.0 + weight`, init 0) — all plain norms; the lone exception is `linear_attn.norm` (`RMSNormGated`, plain `w` + silu-gate, F32). bf16→fp32 via torch `framework="pt"`. Next: 02 attention. |
 
 ---
 
@@ -94,11 +105,18 @@ Status: [ ] todo  [~] in progress  [x] done
    (Supersedes the earlier "per-tensor cudaMemcpy" plan.) (2026-08-31)
 4. **`lm_head` tied** → alias `embed_tokens`, don't look for it on disk. (2026-08-26)
 5. **Correctness path = NumPy-vs-HF before any CUDA kernel.** (2026-08-26)
+6. **Oracle = full HF `AutoModelForImageTextToText` on CPU fp32** (the
+   `ForConditionalGeneration` wrapper, so `.lm_head` and `.model.language_model` exist;
+   attr path = disk key with one extra `.model`). Raw weights via
+   `safe_open(framework="pt").get_tensor(k).float().numpy()` — numpy can't hold bf16. (2026-09-03)
+7. **Tolerance budget:** fp32-native ops expect ~0 (HF also runs them fp32); bf16-weight
+   GEMMs get atol 1e-3. A miss by ≫ that is a *semantics* bug, not rounding. (2026-09-03)
 
 ---
 
 ## Active session briefs
 - `docs/sessions/00-weight-mapping.md` — registry + typed views (P1). **DONE 2026-08-31.**
-- `docs/sessions/01-embed-rmsnorm.md` — NumPy-vs-HF harness + embed/RMSNorm/tied head (P2 slice 1). **NEXT.**
-- (queued, not yet written) 02 — full-attention block (GEMM/GQA/RoPE/QK-norm); 03 — SwiGLU MLP + layer assembly.
+- `docs/sessions/01-embed-rmsnorm.md` — NumPy-vs-HF harness + embed/RMSNorm/tied head (P2 slice 1). **DONE 2026-09-03.**
+- `docs/sessions/02-attention-block.md` — full-attention sub-block, layer 3 (P2 slice 2). **NEXT.**
+- (queued, not yet written) 03 — SwiGLU MLP + decoder-layer assembly (pre-norms, residuals) + causal/KV-cache loop over the 6 attn layers.
 - Note: P2 is split into 01→03 (one concept cluster per session); P3 GatedDeltaNet gets its own 2–3 briefs.

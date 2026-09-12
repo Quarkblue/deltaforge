@@ -179,8 +179,25 @@ def task5_stub():
 
 
 if __name__ == "__main__":
+    # `python harness.py` runs this file as the module named "__main__".
+    # harness_attn does `from harness import ...`, which would import this same
+    # file a SECOND time under the name "harness" — a distinct module object with
+    # its own load_hf lru_cache, so the 8.5 GB model would load twice (~17 GB
+    # peak). Aliasing the two names to one module object makes the cache shared.
+    import sys
+
+    sys.modules.setdefault("harness", sys.modules["__main__"])
+
     task1_weights_agree()
     task2_embedding()
     task3_rmsnorm()
     task4_tied_head()
     task5_stub()
+
+    # Session 02 lives in harness_attn.py, which imports this module. Importing
+    # it here (inside __main__, not at the top) keeps that one-directional: by
+    # the time this line runs, `harness` is fully defined, so there is no
+    # circular-import problem.
+    import harness_attn
+
+    raise SystemExit(1 if harness_attn.main() else 0)

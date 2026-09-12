@@ -10,3 +10,4 @@ test.*
 # executable files
 *.exe
 *.obj
+__pycache__/

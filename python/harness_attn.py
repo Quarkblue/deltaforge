@@ -8,7 +8,7 @@ from transformers.models.qwen3_5.modeling_qwen3_5 import (
     apply_rotary_pos_emb as hf_apply_rotary_pos_emb,
 )
 
-CONFIG_PATH = "../model/Qwen3.5-2B/config.json"
+CONFIG_PATH = "../models/Qwen3.5-2B/config.json"
 
 config = json.load(open(CONFIG_PATH))
 

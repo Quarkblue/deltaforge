@@ -1,0 +1,479 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>deltaforge</title>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Chivo:wght@400;600;700&family=Source+Sans+3:ital,wght@0,400;0,600;1,400&family=IBM+Plex+Mono:wght@400;500;600&display=swap">
+<style>
+/* Layout: single reading column at 68ch, spec tables allowed to run full width inside their own scrollers. */
+:root{
+  --paper:#f4f6f6;
+  --surface:#ffffff;
+  --ink:#121a1d;
+  --ink-soft:#4a5a60;
+  --line:#d2dadb;
+  --accent:#0d6e70;
+  --accent-soft:#e2eeee;
+  --done:#1d6a3f;
+  --active:#9a5b05;
+  --todo:#6b7a80;
+  --font-display:"Chivo","Segoe UI",system-ui,sans-serif;
+  --font-body:"Source Sans 3","Segoe UI",system-ui,sans-serif;
+  --font-mono:"IBM Plex Mono",ui-monospace,"Cascadia Mono",Consolas,monospace;
+}
+@media (prefers-color-scheme:dark){
+  :root:not([data-theme="light"]){
+    --paper:#0d1316;
+    --surface:#141d21;
+    --ink:#e8eef0;
+    --ink-soft:#9bacb2;
+    --line:#27353a;
+    --accent:#4fc0bf;
+    --accent-soft:#17302f;
+    --done:#6ac08a;
+    --active:#e0a64a;
+    --todo:#7f9097;
+    color-scheme:dark;
+  }
+}
+:root[data-theme="dark"]{
+  --paper:#0d1316;
+  --surface:#141d21;
+  --ink:#e8eef0;
+  --ink-soft:#9bacb2;
+  --line:#27353a;
+  --accent:#4fc0bf;
+  --accent-soft:#17302f;
+  --done:#6ac08a;
+  --active:#e0a64a;
+  --todo:#7f9097;
+  color-scheme:dark;
+}
+
+*{box-sizing:border-box}
+body{
+  background:var(--paper);
+  color:var(--ink);
+  font-family:var(--font-body);
+  font-size:16px;
+  line-height:1.6;
+  margin:0;
+  padding-block:0 72px;
+  padding-left:20px;
+  padding-right:20px;
+}
+.wrap{max-width:860px;margin:0 auto}
+.col{max-width:68ch}
+
+/* masthead */
+header.mast{
+  border-bottom:2px solid var(--ink);
+  padding-block:56px 20px;
+  margin-bottom:36px;
+}
+.eyebrow{
+  font-family:var(--font-mono);
+  font-size:11.5px;
+  letter-spacing:.13em;
+  text-transform:uppercase;
+  color:var(--accent);
+  margin:0 0 14px;
+}
+h1{
+  font-family:var(--font-display);
+  font-weight:700;
+  font-size:clamp(38px,8vw,60px);
+  line-height:1.02;
+  letter-spacing:-.02em;
+  margin:0 0 14px;
+  text-wrap:balance;
+}
+.standfirst{
+  font-size:clamp(17px,2.2vw,20px);
+  line-height:1.45;
+  color:var(--ink-soft);
+  margin:0;
+  max-width:60ch;
+}
+.meta{
+  display:flex;
+  flex-wrap:wrap;
+  gap:8px 28px;
+  margin-top:26px;
+  font-family:var(--font-mono);
+  font-size:12.5px;
+  color:var(--ink-soft);
+}
+.meta b{color:var(--ink);font-weight:500}
+
+h2{
+  font-family:var(--font-display);
+  font-weight:600;
+  font-size:13px;
+  letter-spacing:.12em;
+  text-transform:uppercase;
+  color:var(--accent);
+  margin:0 0 18px;
+  padding-bottom:7px;
+  border-bottom:1px solid var(--line);
+}
+h3{
+  font-family:var(--font-display);
+  font-weight:600;
+  font-size:19px;
+  letter-spacing:-.01em;
+  margin:28px 0 8px;
+  text-wrap:balance;
+}
+section{margin-bottom:46px}
+p{margin:0 0 14px}
+a{color:var(--accent)}
+code{
+  font-family:var(--font-mono);
+  font-size:.87em;
+  background:var(--accent-soft);
+  padding:1px 4px;
+  border-radius:3px;
+}
+
+ul,ol{margin:0 0 14px;padding-left:22px}
+li{margin-bottom:7px}
+li::marker{color:var(--accent)}
+.plain{list-style:none;padding-left:0}
+.plain li{
+  padding-left:20px;
+  position:relative;
+}
+.plain li::before{
+  content:"";
+  position:absolute;
+  left:0;top:.62em;
+  width:9px;height:2px;
+  background:var(--accent);
+}
+
+/* tables */
+.scroll{overflow-x:auto;margin:0 0 16px;border:1px solid var(--line);background:var(--surface)}
+table{border-collapse:collapse;width:100%;min-width:400px;font-size:14.5px}
+th,td{text-align:left;padding:9px 14px;border-bottom:1px solid var(--line);vertical-align:top}
+thead th{
+  font-family:var(--font-mono);
+  font-size:11px;
+  letter-spacing:.1em;
+  text-transform:uppercase;
+  color:var(--ink-soft);
+  font-weight:500;
+  background:var(--paper);
+}
+tbody tr:last-child td{border-bottom:0}
+td.num,td.mono,th.num{font-family:var(--font-mono);font-variant-numeric:tabular-nums;white-space:nowrap}
+caption{
+  caption-side:bottom;
+  text-align:left;
+  padding:9px 14px;
+  font-size:13px;
+  color:var(--ink-soft);
+  border-top:1px solid var(--line);
+}
+
+/* two-column spec grid */
+.grid2{display:grid;grid-template-columns:repeat(auto-fit,minmax(248px,1fr));gap:26px}
+.grid2 > div{min-width:0}
+dl{margin:0}
+dt{
+  font-family:var(--font-mono);
+  font-size:11px;
+  letter-spacing:.09em;
+  text-transform:uppercase;
+  color:var(--ink-soft);
+  margin-top:14px;
+}
+dd{margin:2px 0 0}
+
+/* pipeline */
+ol.pipe{counter-reset:p;list-style:none;padding-left:0;margin:0}
+ol.pipe li{
+  counter-increment:p;
+  display:grid;
+  grid-template-columns:34px 1fr;
+  gap:14px;
+  padding:13px 0;
+  border-top:1px solid var(--line);
+  margin:0;
+}
+ol.pipe li:last-child{border-bottom:1px solid var(--line)}
+ol.pipe li::before{
+  content:counter(p);
+  font-family:var(--font-mono);
+  font-size:12px;
+  font-weight:600;
+  color:var(--accent);
+  border:1px solid var(--accent);
+  border-radius:50%;
+  width:26px;height:26px;
+  display:grid;place-items:center;
+  margin-top:2px;
+}
+ol.pipe h4{
+  font-family:var(--font-display);
+  font-size:16px;
+  font-weight:600;
+  margin:0 0 3px;
+}
+ol.pipe p{margin:0;color:var(--ink-soft);font-size:14.5px}
+
+/* status chips */
+.chip{
+  display:inline-block;
+  font-family:var(--font-mono);
+  font-size:10.5px;
+  letter-spacing:.08em;
+  text-transform:uppercase;
+  padding:2px 7px;
+  border:1px solid currentColor;
+  border-radius:2px;
+  white-space:nowrap;
+}
+.chip.done{color:var(--done)}
+.chip.active{color:var(--active)}
+.chip.todo{color:var(--todo)}
+
+.callout{
+  border-left:3px solid var(--accent);
+  background:var(--surface);
+  padding:16px 18px;
+  margin:0 0 16px;
+}
+.callout p:last-child{margin-bottom:0}
+.callout .lede{
+  font-family:var(--font-display);
+  font-weight:600;
+  font-size:15px;
+}
+footer{
+  border-top:1px solid var(--line);
+  padding-top:16px;
+  font-family:var(--font-mono);
+  font-size:12px;
+  color:var(--ink-soft);
+}
+</style>
+
+</head>
+<body>
+<div class="wrap">
+
+<header class="mast">
+  <p class="eyebrow">Product &amp; technical specification</p>
+  <h1>deltaforge</h1>
+  <p class="standfirst">A hand-written CUDA inference engine that runs a 2B-parameter vision-language model end to end on one 8 GB laptop GPU, with no PyTorch, ONNX Runtime or llama.cpp underneath it.</p>
+  <div class="meta">
+    <span><b>Owner</b> Divyansh Chauhan</span>
+    <span><b>Language</b> C++17 / CUDA</span>
+    <span><b>Target</b> RTX 4060 Laptop, sm_89</span>
+    <span><b>Status</b> Phase 3 of 11</span>
+    <span><b>Revised</b> 2026-10-10</span>
+  </div>
+</header>
+
+<section class="col">
+  <h2>Summary</h2>
+  <p>An inference engine is the program that actually runs a trained neural network: it loads the weights, performs the arithmetic on the GPU, and emits tokens. Production engines hide that arithmetic behind large frameworks. deltaforge implements it directly, one operation at a time, as a way of learning modern model architecture at the level where the numbers are.</p>
+  <p>The target model is Qwen3.5-2B, chosen because it is deliberately awkward. It mixes two different attention mechanisms, carries a vision tower, and has a speculative-decoding head. Nothing in it is cut from scope. A simpler model would have taught less.</p>
+  <p>Every component is checked against HuggingFace Transformers running the same model, stage by stage, before it is trusted. That comparison harness is as much the product as the kernels are.</p>
+</section>
+
+<section class="col">
+  <h2>Goals</h2>
+  <ul class="plain">
+    <li><b>Run the whole model.</b> Text generation first, then image input, then the multi-token prediction head. Text is the first milestone, not the boundary.</li>
+    <li><b>Own every line of the inference path.</b> The only third-party code on the hot path is cuBLAS for matrix multiplication. Weight loading, memory management, all element-wise kernels, attention, the recurrent state updates, sampling and tokenization are written here.</li>
+    <li><b>Fit the hardware honestly.</b> 8 GB of VRAM, 4.24 GiB of which is weights. No offloading to host memory, no quantization in version one.</li>
+    <li><b>Prove correctness numerically.</b> Every stage matches a reference activation from HuggingFace within a recorded tolerance, and every check carries a deliberately wrong variant that must fail.</li>
+    <li><b>Be fast enough to use.</b> Interactive single-stream decoding on the target laptop.</li>
+  </ul>
+
+  <h3>Non-goals</h3>
+  <ul class="plain">
+    <li>Training, fine-tuning or backpropagation.</li>
+    <li>Multi-GPU, multi-node, or batched serving of concurrent users. Batch size is fixed at one.</li>
+    <li>A general framework. This engine runs one architecture well rather than any model badly.</li>
+    <li>Beating vLLM or TensorRT-LLM on throughput.</li>
+    <li>Portability in version one. Windows and Ada-generation consumer GPUs are the only supported target.</li>
+  </ul>
+</section>
+
+<section>
+  <h2>Capabilities</h2>
+  <div class="scroll">
+    <table>
+      <thead><tr><th>Capability</th><th>What it means</th><th class="num">Milestone</th></tr></thead>
+      <tbody>
+        <tr><td>Weight loading</td><td>Memory-map a safetensors file, parse its header, upload one contiguous slab to the GPU</td><td class="num">Done</td></tr>
+        <tr><td>Text generation</td><td>Prompt in, tokens out, greedy and sampled, with a key-value cache</td><td class="num">Phase 6</td></tr>
+        <tr><td>Tokenization</td><td>Byte-level BPE in C++, reading the model's own vocabulary and merge rules</td><td class="num">Phase 6.5</td></tr>
+        <tr><td>Image input</td><td>Vision transformer tower plus a projection into the text embedding space</td><td class="num">Phase 8</td></tr>
+        <tr><td>Mixed image and text positions</td><td>Multimodal rotary embeddings, so pictures and words share a position scheme</td><td class="num">Phase 9</td></tr>
+        <tr><td>Speculative decoding</td><td>The model's multi-token prediction head, for throughput</td><td class="num">Phase 10</td></tr>
+      </tbody>
+    </table>
+  </div>
+</section>
+
+<section>
+  <h2>Architecture</h2>
+  <p class="col">Four layers, each independently testable. The loader and the test harness are shared by every phase; kernels are added one component at a time.</p>
+  <div class="scroll">
+    <table>
+      <thead><tr><th>Layer</th><th>Responsibility</th><th>Key pieces</th></tr></thead>
+      <tbody>
+        <tr><td><b>Model loading</b></td><td>Map the weight file without reading it into the heap, resolve 632 tensors by name and data type, upload once, expose typed views per layer</td><td class="mono">safetensors.hpp, model.hpp, mapped_file.hpp</td></tr>
+        <tr><td><b>Runtime</b></td><td>One device allocation for activations with bump allocation and per-token reset, persistent caches, a single cuBLAS handle and stream</td><td class="mono">arena.hpp, device_buffer.hpp, context.hpp, tensor.hpp</td></tr>
+        <tr><td><b>Kernels</b></td><td>Roughly ten hand-written kernels plus cuBLAS for every matrix multiply</td><td class="mono">kernel.cu, kernels.hpp, bf16.hpp</td></tr>
+        <tr><td><b>Verification</b></td><td>Reference activations captured from HuggingFace, a comparison routine, and a test binary that re-runs every earlier check</td><td class="mono">dump_oracle.py, compare.hpp, tests/</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <h3>The kernel set</h3>
+  <p class="col">Deliberately small. Matrix multiplication goes to cuBLAS because hand-written GEMM would be slower and teaches less than the rest of the list. Everything else is written here: embedding lookup, RMS normalization in both its plain and gated forms, rotary position embedding, fused SiLU and multiply, the sigmoid output gate, masked softmax, residual addition, the causal depthwise convolution step, the gated delta-rule state update, and argmax sampling.</p>
+</section>
+
+<section>
+  <h2>Verification method</h2>
+  <div class="callout col">
+    <p class="lede">A wrong kernel usually produces the right shape.</p>
+    <p>Reordering attention heads, scaling a norm by the wrong tensor, or rotating too many dimensions all return a correctly shaped tensor full of plausible numbers. Shape assertions and eyeball checks on generated text both miss them. So every stage is compared against a recorded reference, and every comparison ships with a wrong variant that must fail.</p>
+  </div>
+  <ol class="pipe">
+    <li><div><h4>Capture</h4><p>Run HuggingFace once on a fixed prompt with hooks on every module, saving each intermediate tensor to a safetensors file. 196 tensors, 49 MiB.</p></div></li>
+    <li><div><h4>Match precision</h4><p>The reference runs in the same number format as the engine, and upcasts to 32-bit in exactly the places the reference does, so a difference means a bug rather than rounding.</p></div></li>
+    <li><div><h4>Compare</h4><p>Each kernel's output is copied back and compared against its reference stage in double precision, reporting relative error, the worst element, and any disagreement about infinities or not-a-number values.</p></div></li>
+    <li><div><h4>Falsify</h4><p>Each check has a sibling that must differ: the naive tensor split, the wrong normalization weight, the wrong key-value head expansion. If a wrong variant starts passing, the test itself has stopped working.</p></div></li>
+    <li><div><h4>Regress</h4><p>One command re-runs every stage from every earlier phase and exits with the number of failures, so a kernel added late cannot quietly break an early one.</p></div></li>
+  </ol>
+  <p class="col">Components are built in single-token stepping form first, including the prefill pass, which runs as a loop over that same step. Correctness comes before the batched and chunked forms that make it fast, and those are then checked against the step version.</p>
+</section>
+
+<section>
+  <h2>Technical specifications</h2>
+  <div class="grid2">
+    <div>
+      <dl>
+        <dt>GPU</dt><dd>NVIDIA RTX 4060 Laptop, compute capability 8.9, 24 streaming multiprocessors, 8 GB GDDR6, about 6.4 GB free for the engine</dd>
+        <dt>Host</dt><dd>Windows 11, MSVC 19.44</dd>
+        <dt>Toolchain</dt><dd>CUDA 13.3, CMake 3.18 or newer, C++17, Visual Studio 2022 generator</dd>
+        <dt>Dependencies</dt><dd>cuBLAS, and a single-header JSON parser. Python with PyTorch and Transformers is used only to produce reference activations, never at runtime.</dd>
+      </dl>
+    </div>
+    <div>
+      <dl>
+        <dt>Weights</dt><dd>One safetensors shard, 4 548 144 832 bytes (4.236 GiB), 632 tensors, 596 in bfloat16 and 36 in 32-bit float. Data type is read per tensor.</dd>
+        <dt>Numerics</dt><dd>bfloat16 activations and weights; normalization, softmax and the recurrent state in 32-bit float, matching the reference implementation</dd>
+        <dt>Batch size</dt><dd>1</dd>
+        <dt>Max context</dt><dd>32 768 tokens, limited by cache memory rather than by the model, which allows 262 144</dd>
+      </dl>
+    </div>
+  </div>
+
+  <h3>Model under test</h3>
+  <p class="col">The engine is written for one architecture. It has 24 decoder layers of 2048 dimensions over a 248 320-token vocabulary, and the layers are not all alike: six use grouped-query attention with 8 query heads against 2 key-value heads, and the other eighteen are gated delta networks, a recurrent linear-attention design that keeps a fixed-size state instead of a growing cache. On top of that sit a 24-block vision transformer and a multi-token prediction head. The output projection shares its weights with the input embedding table.</p>
+
+  <h3>Memory budget</h3>
+  <div class="scroll">
+    <table>
+      <thead><tr><th>Allocation</th><th class="num">Size</th><th>Basis</th></tr></thead>
+      <tbody>
+        <tr><td>Weights, single slab</td><td class="num">4338 MiB</td><td>Measured file size</td></tr>
+        <tr><td>Key-value cache</td><td class="num">384 MiB</td><td>12 KiB per token across 6 attention layers, at full context</td></tr>
+        <tr><td>Recurrent states</td><td class="num">18 MiB</td><td>18 gated delta layers, fixed size, 32-bit float</td></tr>
+        <tr><td>Convolution states</td><td class="num">0.84 MiB</td><td>18 layers of depthwise convolution history</td></tr>
+        <tr><td>Activation arena</td><td class="num">16 MiB</td><td>Reserved; 1.26 MiB measured in use</td></tr>
+        <tr><td>cuBLAS workspace</td><td class="num">32 MiB</td><td>Reserved</td></tr>
+        <tr><td><b>Total</b></td><td class="num"><b>4789 MiB</b></td><td>About 1.7 GiB of headroom</td></tr>
+      </tbody>
+      <caption>Batch size 1, bfloat16 activations, 32 768-token context. Only the key-value cache and the attention score buffer grow with context length.</caption>
+    </table>
+  </div>
+
+  <h3>Performance targets</h3>
+  <p class="col">Single-stream decoding is limited by memory bandwidth, not arithmetic: each token reads roughly 3.7 GiB of weights, against about 270 GB/s of bandwidth on this card. That puts the ceiling near 70 tokens per second and makes the target 30 or better, with the shared output projection over a 248 320-token vocabulary as the largest single read. These are estimates from the specification sheet. Real numbers get measured in phase 7 and recorded here.</p>
+</section>
+
+<section>
+  <h2>Roadmap</h2>
+  <div class="scroll">
+    <table>
+      <thead><tr><th class="num">Phase</th><th>Deliverable</th><th class="num">State</th></tr></thead>
+      <tbody>
+        <tr><td class="num">0</td><td>Build toolchain, CUDA compiling and running</td><td class="num"><span class="chip done">Done</span></td></tr>
+        <tr><td class="num">1</td><td>Weight loading, typed registry, single-slab upload with self-checks</td><td class="num"><span class="chip done">Done</span></td></tr>
+        <tr><td class="num">2</td><td>Reference implementations of the bracketing operations and the attention block, checked against HuggingFace</td><td class="num"><span class="chip done">Done</span></td></tr>
+        <tr><td class="num">3</td><td>Reference activation dumps, runtime skeleton, test harness, first three kernels</td><td class="num"><span class="chip active">Active</span></td></tr>
+        <tr><td class="num">4</td><td>Full attention decoder layer in stepping form, with its key-value cache</td><td class="num"><span class="chip todo">Next</span></td></tr>
+        <tr><td class="num">5</td><td>Gated delta network layer: projections, convolution state, delta-rule update</td><td class="num"><span class="chip todo">Planned</span></td></tr>
+        <tr><td class="num">6</td><td>All 24 layers plus greedy decoding, matching the reference token for token</td><td class="num"><span class="chip todo">Planned</span></td></tr>
+        <tr><td class="num">6.5</td><td>Byte-level BPE tokenizer in C++</td><td class="num"><span class="chip todo">Planned</span></td></tr>
+        <tr><td class="num">7</td><td>Speed: batched prefill, chunked recurrence, measured tokens per second</td><td class="num"><span class="chip todo">Planned</span></td></tr>
+        <tr><td class="num">8</td><td>Vision tower and projection into the text stream</td><td class="num"><span class="chip todo">Planned</span></td></tr>
+        <tr><td class="num">9</td><td>Multimodal position embeddings and image-text fusion</td><td class="num"><span class="chip todo">Planned</span></td></tr>
+        <tr><td class="num">10</td><td>Multi-token prediction head and speculative decoding</td><td class="num"><span class="chip todo">Planned</span></td></tr>
+      </tbody>
+      <caption>Phase 6 is the first milestone a person can watch: text coming out of the engine.</caption>
+    </table>
+  </div>
+</section>
+
+<section>
+  <h2>Measured so far</h2>
+  <div class="scroll">
+    <table>
+      <thead><tr><th>Check</th><th class="num">Result</th><th>Meaning</th></tr></thead>
+      <tbody>
+        <tr><td>All 632 tensors claimed exactly once, upload verified byte for byte</td><td class="num">Exact</td><td>Nothing is misnamed, overlapped or left behind</td></tr>
+        <tr><td>Reference dumps, both precisions</td><td class="num">196 tensors</td><td>49 MiB and 80 MiB, regenerated by one command, reloaded bit for bit</td></tr>
+        <tr><td>Number-format conversion against PyTorch</td><td class="num">65 536 / 65 536</td><td>Every bfloat16 bit pattern, including rounding ties and not-a-number cases</td></tr>
+        <tr><td>Activation arena, 10 000 reset cycles</td><td class="num">0 allocations</td><td>No device allocation happens inside the decode loop</td></tr>
+        <tr><td>Peak activation memory per step</td><td class="num">1.26 MiB</td><td>Against a 16 MiB reservation</td></tr>
+        <tr><td>Attention block against the reference, phase 2</td><td class="num">4.9e-07</td><td>Relative error three orders inside its budget</td></tr>
+        <tr><td>16-bit run against the 32-bit anchor, end of stack</td><td class="num">4.1e-03</td><td>The precision floor: anything near it is a real bug, not rounding</td></tr>
+      </tbody>
+    </table>
+  </div>
+</section>
+
+<section class="col">
+  <h2>Risks</h2>
+  <ul class="plain">
+    <li><b>The gated delta network is the hard part.</b> It is a recurrent state update with gating and a delta rule, and the reference uses two different formulations for prefill and decode. Mitigation: build the single-token form first and treat the chunked version as an optimization validated against it.</li>
+    <li><b>Memory headroom is thin.</b> 4.24 GiB of weights on an 8 GB card that is also driving a display. Mitigation: a single slab allocation, a measured activation budget, and no duplicate buffers.</li>
+    <li><b>Precision drift accumulates over 24 layers.</b> Mitigation: the reference runs in the engine's own number format, tolerances are relative rather than absolute, and a per-layer drift table shows where divergence starts.</li>
+    <li><b>Correct arithmetic, wrong plumbing.</b> Reversed head order or a mis-offset cache mask passes any shape check. Mitigation: wrong-variant tests alongside every comparison.</li>
+    <li><b>Tokenizer mismatch.</b> A byte-level BPE implementation that differs on one edge case produces fluent nonsense. Mitigation: compare identifiers against the reference tokenizer over a corpus, not a handful of sentences.</li>
+  </ul>
+</section>
+
+<section class="col">
+  <h2>Definition of done</h2>
+  <ol>
+    <li>The engine loads the model and generates text from a prompt with no Python in the process.</li>
+    <li>Greedy output matches the reference implementation token for token on a fixed prompt.</li>
+    <li>It accepts an image and answers questions about it.</li>
+    <li>Decode speed and peak memory are measured and recorded on the target laptop.</li>
+    <li>One command re-runs every stage comparison and reports zero failures.</li>
+  </ol>
+</section>
+
+<section class="col">
+  <h2>Repository</h2>
+  <p>C++ headers in <code>include/</code>, the entry point and kernels in <code>src/</code>, stage comparisons in <code>tests/</code>, the reference dumper in <code>python/</code>, weights in <code>models/</code>, and the working plan in <code>docs/</code>. Build with CMake using the Visual Studio 2022 generator; <code>infer</code> runs the engine and <code>deltaforge_test</code> runs every stage comparison.</p>
+  <p>Development runs as one session per component, each seeded by a brief under <code>docs/sessions/</code> that records what to research, what counts as done, and what went wrong. <code>docs/PROJECT.md</code> holds the decision log.</p>
+</section>
+
+<footer>deltaforge · product and technical specification · revised 2026-10-10</footer>
+
+</div>
+
+</body>
+</html>

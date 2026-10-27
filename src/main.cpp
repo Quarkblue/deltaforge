@@ -1,7 +1,11 @@
 #include <cuda_runtime.h>
 #include <iostream>
+#include <fstream>
 
 #include "model.hpp"
+#include "model_checks.hpp"
+#include "safetensors.hpp"
+#include "manifest.hpp"
 
 
 int checkGPUStatus() {
@@ -26,10 +30,23 @@ int checkGPUStatus() {
 }
 
 int main() {
+
+    std::wstring model_path = L"D:\\AI\\Inferencing\\deltaforge\\models\\Qwen3.5-2B\\";
+
     checkGPUStatus();
-    Model model(L"D:\\AI\\Inferencing\\deltaforge\\model\\Qwen3.5-2B\\",
+    Model model(L"D:\\AI\\Inferencing\\deltaforge\\models\\Qwen3.5-2B\\",
                 L"model.safetensors-00001-of-00001.safetensors", L"config.json");
-    model.selfCheck();
-    model.dump();
+    model_checks::selfCheck(model);
+    manifest::printSummary(std::cout, model.getWeights());
+    std::cout << "--- language model layer 3 ---\n";
+    manifest::printManifest(std::cout, model.getWeights(), "model.language_model.layers.3.");
+    // SafeTensors qwen35_2b(model_path + L"model.safetensors-00001-of-00001.safetensors");
+    // SafeTensors dump_bf16(L"D:\\AI\\Inferencing\\deltaforge\\dumps\\oracle_bf16.safetensors");
+
+    // manifest::printSummary(std::cout, model.getWeights());
+    // manifest::printMetadata(std::cout, model.getWeights());
+    // std::cout << "--- L03 ---\n";
+    // manifest::printManifest(std::cout, model.getWeights());
+
     return 0;
 }

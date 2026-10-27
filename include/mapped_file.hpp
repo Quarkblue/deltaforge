@@ -58,6 +58,7 @@ class MappedFile {
             }            
         }
 
+        // destructor
         ~MappedFile() {
             release();
         }
@@ -65,15 +66,18 @@ class MappedFile {
         const std::uint8_t* data() const { return static_cast<const std::uint8_t*>(data_); }
         size_t size() const { return size_; }
 
+        // disable copying and moving
         MappedFile(const MappedFile&) = delete;
         MappedFile& operator=(const MappedFile&) = delete;
 
+        // enable moving
         MappedFile(MappedFile&& other) noexcept
             : file_(std::exchange(other.file_, INVALID_HANDLE_VALUE)),
               mapping_(std::exchange(other.mapping_, nullptr)),
               data_(std::exchange(other.data_, nullptr)),
               size_(std::exchange(other.size_, 0)) {}
 
+        // enable moving assignment
         MappedFile& operator=(MappedFile&& other) noexcept {
             if (this != &other) {
                 release();

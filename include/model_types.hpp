@@ -8,12 +8,6 @@
 
 using json = nlohmann::json;
 
-struct ModelHeader {
-    json header_json; // json header of the model
-    // offset to the data section of the model (8 + header_size)
-    size_t data_offset;
-};
-
 struct RMSNorm { const TensorView* weight; };
 
 struct MLP { const TensorView* gate_proj, *up_proj, *down_proj; };

@@ -17,7 +17,7 @@ import torch
 from safetensors import safe_open
 
 
-MODEL_DIR = "../model/Qwen3.5-2B"
+MODEL_DIR = "../models/Qwen3.5-2B"
 SHARD = f"{MODEL_DIR}/model.safetensors-00001-of-00001.safetensors"
 
 # Disk keys (verified from the shard). No lm_head on disk — it is TIED to embed.

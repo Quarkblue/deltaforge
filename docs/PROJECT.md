@@ -3,8 +3,9 @@
 **Goal:** Hand-written CUDA inference engine (C++/nvcc) that runs **Qwen3.5-2B
 in full** — it is a vision-language model, so the engine handles **text + vision
 input, mrope, and the MTP head**, not just text. Target: single RTX 4060 Laptop
-(8 GB, sm_89). Learning-driven: each component is researched, prototyped in NumPy
-against HuggingFace, then ported to CUDA.
+(8 GB, sm_89). Learning-driven: each component is researched, then written **directly
+in CUDA/C++** and validated stage-by-stage against **HuggingFace activation dumps**
+(decision 11; the NumPy-first path ran for sessions 01-02 and was retired 2026-09-13).
 
 **Scope vs. order:** everything the model does is in scope. We *build* it
 incrementally, and text-only generation is the **first bring-up milestone** (a
@@ -30,11 +31,13 @@ phases, not cut features.
 - **Toolchain:** CUDA 13.3, MSVC 19.44, CMake (VS 2022 gen). Build flags live in
   `CMakeLists.txt` (`sm_89`, C++17, `/Zc:preprocessor`, links `CUDA::cublas`).
 - **Repo layout:** `D:\AI\Inferencing\deltaforge` (git). C++ in `include/*.hpp` +
-  `src/`; Python reference/harness in `python/` (`.venv`, `reference.py`);
+  `src/`; Python in `python/` (`.venv`; HF oracle dumper from brief 04; legacy NumPy
+  harness `harness.py`/`harness_attn.py` kept as record, not extended);
   weights in `model/Qwen3.5-2B/`; briefs in `docs/sessions/`.
 
 ### Architecture — language model
-- hidden **2048**, intermediate **6144** (SwiGLU), **24 layers**, vocab **248320**.
+- hidden **2048**, intermediate **6144 = 3 x 2048** (SwiGLU: `down(silu(gate(x)) * up(x))`),
+  **24 layers**, vocab **248320**. Decoder layer is pre-norm with two residual adds.
 - Norm: **RMSNorm**, eps 1e-6, **zero-centered: scale = `(1 + weight)`** (param stored as
   delta-from-1, Gemma-style). Applies to input/post-attn norms, q_norm, k_norm, final norm.
   **Exception:** `linear_attn.norm` is `RMSNormGated` — plain `weight` (init 1), F32, times
@@ -49,16 +52,23 @@ phases, not cut features.
   remaining 192 pass through; `inv_freq` has 32 entries, cos/sin duplicated to 64);
   scale 1/16; `attn_out * sigmoid(gate)` before o_proj. Merge is **head-major per token**,
   gate flattened identically. HF `self_attn.forward` needs a batch axis.
+  **KV cache:** post-norm, post-RoPE k and v, `[2 kv_heads, T, 256]` each ->
+  **24 KiB/token fp32, 12 KiB/token bf16** across the 6 attn layers. Causal mask for a
+  multi-token chunk after a non-empty cache is `[S_q, S_k]` offset by cache length.
 - GatedDeltaNet (16 heads, head_dim 128): in_proj_qkv[6144,2048],
   conv1d[6144,1,4] (depthwise, causal), in_proj_a/b[16,2048], A_log[16]F32,
   dt_bias[16], in_proj_z[2048,2048], norm[128]F32 (gated), out_proj[2048,2048].
+  HF cache per GDN layer: `conv_states`, `recurrent_states` (`modeling_qwen3_5.py:455,504`).
+- **HF dtype policy in bf16 mode (engine mirrors it, decision 13):** RMSNorm math in fp32
+  then cast back; `RMSNormGated` fp32 (177-184); softmax fp32 (621); both delta-rule
+  forms upcast q/k/v/beta/g to fp32 (266, 347); RoPE cos/sin computed fp32, cast to x dtype (140-147).
 ### Architecture — vision + extras (in scope, later phases)
 - **Vision tower** `model.visual.*`: Conv3d patch_embed (3→1024, kernel 2×16×16),
   pos_embed Embedding(2304,1024), 24 ViT blocks (**LayerNorm w/ bias**, qkv+proj,
   GELU-tanh MLP), then a **merger** (LayerNorm → fc 4096→4096 → GELU → fc 4096→2048)
   that projects vision features into the 2048-dim text space. Runs only on image input.
 - **mrope** — multimodal RoPE (`rope_parameters.mrope_interleaved`, sections
-  [11,11,10]); needed once vision tokens share positions with text. **P7 plug-in point =**
+  [11,11,10]); needed once vision tokens share positions with text. **P9 plug-in point =**
   `apply_interleaved_mrope` (`modeling_qwen3_5.py:148`): text-only, all 3 position rows
   are equal and it collapses to plain RoPE (verified 02).
 - **MTP** `mtp.*` — multi-token-prediction / speculative head. Not wired into HF's
@@ -68,27 +78,31 @@ phases, not cut features.
 
 ## Phase roadmap
 
-Status: [ ] todo  [~] in progress  [x] done
+Status: [ ] todo  [~] in progress  [x] done  (renumbered 2026-09-13, decision 11)
 
 - [~] **P0. Setup** — CUDA/nvcc/CMake build working. (done: vectorAdd runs)
 - [x] **P1. Model loading** — mmap, safetensors header parse, weight registry
       (632 → typed LM/vision/MTP views), single-slab GPU upload. `dump()` + self-checks.
-- [~] **P2. Decoder backbone (NumPy ref first)** — embedding, RMSNorm, linear/GEMM,
-      attention, GQA, RoPE, QK-norm, SwiGLU, final norm + tied head, KV cache, greedy sampling.
-      (slices 1-2 done: embed + RMSNorm + tied head + harness; full-attention sub-block
-      `attn()` at 4.9e-07 vs HF. next: 03 SwiGLU MLP + decoder-layer assembly.)
-- [ ] **P3. GatedDeltaNet layers** — linear attention → SSM/Mamba2 → gated delta rule.
-- [ ] **P4. Full LM NumPy forward matches HF logits (~1e-3).**  ← text bring-up milestone
-- [ ] **P4.5. Tokenizer** — P4 uses HF `AutoTokenizer` (ids only); before P5 wiring, a
-      C++ byte-level BPE from `tokenizer.json` (pre-tok regex, merges, byte↔unicode map,
-      special tokens, chat template), validated id-for-id vs HF. Own brief. Vision special
-      tokens (`<|vision_start|>`, `<|image_pad|>`, …) revisited at P7.
-- [ ] **P5. CUDA port of the LM** — kernels per op, cuBLAS for GEMMs. First runnable text gen.
-- [ ] **P6. Vision tower** — patch embed, ViT blocks, merger → image tokens into text stream.
-- [ ] **P7. mrope + multimodal fusion** — position handling for mixed image/text sequences.
-- [ ] **P8. MTP / speculative decoding** — the multi-token head, for throughput.
+- [x] **P2. NumPy reference (closed, superseded)** — 01 embed/RMSNorm/head and 02 attention
+      done vs HF; 03 stopped before code. Findings live in Target facts.
+- [ ] **P3. Oracle + engine skeleton** — HF bf16 activation dumps (safetensors), CMake
+      lib + `deltaforge_test`, Tensor/arena/cuBLAS context, bf16 helpers, first kernels:
+      embed, RMSNorm, tied head. → brief 04
+- [ ] **P4. Full-attention decoder layer, step form** — projections, gated q, QK-norm,
+      RoPE, GQA, KV cache, output gate, MLP, residuals. Layers 3 + 7 match. → brief 05
+- [ ] **P5. GatedDeltaNet decoder layer, step form** — projections, conv1d state, gated
+      norm (06); delta-rule step + recurrent state (07).
+- [ ] **P6. Text bring-up** — 24 layers, prefill = loop of step, greedy decode id-for-id vs
+      HF bf16 `generate`, per-layer drift table. → brief 08  ← **first text milestone**
+- [ ] **P6.5. Tokenizer (C++ byte-level BPE)** — ids match HF on a test corpus. No
+      dependencies; run any time before P6 closes. → brief 09
+- [ ] **P7. Speed** — batched attention prefill + chunked GDN, validated vs the P6 step loop;
+      measure tokens/s + VRAM (resume numbers). → brief 10
+- [ ] **P8. Vision tower** — patch embed, ViT blocks, merger → image tokens into text stream.
+- [ ] **P9. mrope + multimodal fusion** — position handling for mixed image/text sequences.
+- [ ] **P10. MTP / speculative decoding** — the multi-token head, for throughput.
 
-(P6–P8 are the rest of the engine, not optional extras — text is done at P5.)
+(P8–P10 are the rest of the engine, not optional extras — same pattern: HF dumps → CUDA.)
 
 ---
 
@@ -101,6 +115,7 @@ Status: [ ] todo  [~] in progress  [x] done
 | 2026-09-01 | housekeeping | Repo renamed `start-inferencing` → **`deltaforge`**, `git init` + first commit (`2bf0182`). P1 code split out of `main.cpp` into `include/{mapped_file,tensor_view,dtype,model_types,model}.hpp` (+ vendored `json.hpp`); `src/main.cpp` is now just GPU probe + `Model` ctor/selfCheck/dump. `src/kernel.cu` empty placeholder. No P2 work yet. |
 | 2026-09-03 | 01 embed/RMSNorm/head | **P2 slice 1 done.** `python/harness.py`: NumPy-vs-HF harness (`load_raw`/`load_hf`(cached fp32 CPU)/`compare`) + ops `embed`, `rmsnorm`, `tied_head`. All 5 tasks pass — embed & RMSNorm bit-exact, head 1.6e-6, tie proven by shared `data_ptr`. **Trap found:** `Qwen3_5RMSNorm` is zero-centered (`1.0 + weight`, init 0) — all plain norms; the lone exception is `linear_attn.norm` (`RMSNormGated`, plain `w` + silu-gate, F32). bf16→fp32 via torch `framework="pt"`. Next: 02 attention. |
 | 2026-09-13 | 02 attention block | **P2 slice 2 done.** `python/harness_attn.py`: **`attn(x, pos, layer_idx)`** matches HF layer-3 `self_attn` at **4.92e-07** (layer 7: 6.41e-07), budget 1e-3. All 5 stages verified in isolation + 5 negative controls that must XFAIL (naive q/gate split 6.0e0, plain-w norm 7.0e0, rotate-all-256 7.9e0, np.tile KV 3.0e0). `python harness.py` runs 01+02 green. **Refinements:** `rotary_emb` returns `[b,seq,64]` not 3-row mrope — `apply_interleaved_mrope` (modeling:148) collapses it, and that line is the whole P7 hook; `inv_freq` has 32 entries not 64; `self_attn.forward` needs a batch axis; attn-output merge and gate are both head-major and must align. **Trap:** running `harness.py` as `__main__` made `harness_attn`'s `from harness import` load the model a second time (~17 GB) — fixed by aliasing `sys.modules`. Next: 03 MLP + layer assembly. |
+| 2026-09-13 | 03 stopped → pivot | **NumPy-first retired** (decision 11): too slow for the value; the bugs were caught by per-stage HF comparison, not by the reimplementation. 03 stopped after pre-flight, which caught two brief errors (KV = 24 KiB/token fp32 not 12; 6144 = 3×2048 not 8/3×2048) and two harness traps (square causal mask only correct for S_q=1; shared failure list). Roadmap renumbered: P3 oracle+skeleton → P6 text bring-up (5 sessions + tokenizer). Next: brief 04. |
 
 ---
 
@@ -114,17 +129,17 @@ Status: [ ] todo  [~] in progress  [x] done
    tensor's `device_ptr` is an interior pointer into the slab, freed once.
    (Supersedes the earlier "per-tensor cudaMemcpy" plan.) (2026-08-31)
 4. **`lm_head` tied** → alias `embed_tokens`, don't look for it on disk. (2026-08-26)
-5. **Correctness path = NumPy-vs-HF before any CUDA kernel.** (2026-08-26)
+5. ~~Correctness path = NumPy-vs-HF before any CUDA kernel.~~ (2026-08-26) **Superseded by 11.**
 6. **Oracle = full HF `AutoModelForImageTextToText` on CPU fp32** (the
    `ForConditionalGeneration` wrapper, so `.lm_head` and `.model.language_model` exist;
    attr path = disk key with one extra `.model`). Raw weights via
    `safe_open(framework="pt").get_tensor(k).float().numpy()` — numpy can't hold bf16. (2026-09-03)
-7. **Tolerance budget:** fp32-native ops expect ~0 (HF also runs them fp32); bf16-weight
+7. *(Superseded by 13 for the CUDA path.)* **Tolerance budget:** fp32-native ops expect ~0 (HF also runs them fp32); bf16-weight
    GEMMs get atol 1e-3. A miss by ≫ that is a *semantics* bug, not rounding. (2026-09-03)
 8. **Tokenizer deferred to P4.5, not P2.** Per-op NumPy checks are driven by ids /
    random hidden states, so a tokenizer adds no correctness signal until real prompts
    (P4) and is only *required* for the C++ engine (P5). Embedding lookup itself was
-   done in 01. (2026-09-04)
+   done in 01. (2026-09-04) *Now brief 09 / P6.5, independent.*
 9. **Every harness stage ships a negative control** (`check_differs` → `XFAIL`): the wrong
    variant (naive q/gate split, `np.tile` KV, plain-`w` norm, rotate-all-256) must *fail*.
    Same-shape bugs are invisible to shape checks; controls are the only proof the test
@@ -133,13 +148,32 @@ Status: [ ] todo  [~] in progress  [x] done
    (never the reverse, except inside `harness.py`'s `__main__`); `python harness.py` runs
    everything and exits non-zero. Alias `sys.modules["harness"]` to `__main__` there or
    the 8.5 GB oracle loads twice. Run with `python/.venv/Scripts/python.exe` from `python/`. (2026-09-13)
+   *(Legacy NumPy harness only.)*
+11. **Direct CUDA, validated against HF activation dumps** (supersedes 5). HF runs once per
+    dump on CPU with hooks; C++ compares each stage. No NumPy reimplementation. (2026-09-13)
+12. **Bring-up is step form only.** Every layer is written as a one-token step with its cache;
+    prefill = loop of steps. HF full-sequence row *t* equals step output *t*, so one dump
+    covers all checks. Batched prefill + chunked GDN come in P7, validated vs the loop. (2026-09-13)
+13. **Oracle dtype = engine dtype.** Dump HF in **bf16** (plus one fp32 anchor dump). Activations
+    are bf16 on device; kernels upcast to fp32 exactly where HF does (see Target facts) and
+    cast back with PyTorch's rounding. Tolerance is **relative** per stage (max|d| / max|ref|);
+    bf16 budget calibrated in brief 04. (2026-09-13)
+14. **Dumps are safetensors**, read by the existing C++ parser. Naming `ids`, `embed`,
+    `L{ii}.{stage}`, `final_norm`, `logits`, `L{ii}.cache.{k,v,conv,recurrent}`. Dumps are
+    gitignored and regenerated by one command. (2026-09-13)
+15. **Engine skeleton fixed once (brief 04):** batch 1, fixed max context, one activation arena
+    (no device malloc in the decode loop), one cuBLAS handle, cuBLAS for every GEMM, ~10
+    custom kernels. `deltaforge_test` (CTest) re-runs every stage each session; negative
+    controls carry over from decision 9. (2026-09-13)
+16. **Briefs tag research as *gating* or *optional*;** only gating items block a milestone.
+    Each brief carries all known traps forward. (2026-09-13)
 
 ---
 
 ## Active session briefs
 - `docs/sessions/00-weight-mapping.md` — registry + typed views (P1). **DONE 2026-08-31.**
-- `docs/sessions/01-embed-rmsnorm.md` — NumPy-vs-HF harness + embed/RMSNorm/tied head (P2 slice 1). **DONE 2026-09-03.**
-- `docs/sessions/02-attention-block.md` — full-attention sub-block, layer 3 (P2 slice 2). **DONE 2026-09-13.**
-- `docs/sessions/03-mlp-decoder-layer.md` — SwiGLU MLP + pre-norm decoder layer + KV-cache prefill/step (P2 slice 3). **NEXT.** Imports `attn()` from `harness_attn.py`.
-- (queued, not yet written) P3 GatedDeltaNet in 2-3 briefs: 04 conv1d + projections + gated RMSNorm; 05 delta rule (recurrent form) vs HF `torch_recurrent_gated_delta_rule`; 06 chunked form + full 24-layer assembly (-> P4).
-- Note: P2 is split into 01→03 (one concept cluster per session); P3 GatedDeltaNet gets its own 2–3 briefs.
+- `docs/sessions/01-embed-rmsnorm.md` — NumPy harness + embed/RMSNorm/tied head (P2). **DONE 2026-09-03.**
+- `docs/sessions/02-attention-block.md` — NumPy full-attention sub-block (P2). **DONE 2026-09-13.**
+- `docs/sessions/03-mlp-decoder-layer.md` — **STOPPED 2026-09-13** (pivot). Pre-flight notes harvested into facts + brief 05.
+- `docs/sessions/04-oracle-skeleton.md` — HF bf16 dumps + engine skeleton + test runner + embed/RMSNorm/head kernels (P3). **NEXT.**
+- (queued) 05 full-attn layer step form (P4) · 06 GDN projections/conv/gated norm · 07 GDN delta-rule step (P5) · 08 text bring-up (P6) · 09 tokenizer (P6.5, any time) · 10 speed (P7).

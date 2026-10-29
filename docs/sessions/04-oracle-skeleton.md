@@ -267,7 +267,50 @@ budget and bf16 GEMM tolerance are recorded as numbers.
     must be revisited before any kernel here takes a dynamic block size.
   - `checkEmbedGather()` uploads the full 1017 MiB table, so it is **commented out** in `main`
     after one green run. Put it behind a `DELTAFORGE_SLOW` env gate rather than a comment.
-- [ ] task 7 tied head — calibrated bf16 GEMM tolerance
+- [x] task 7 tied head via cuBLAS — **DONE 2026-10-29**
+  - `tiedHead(ctx, logits, h, table)` in `src/kernel.cu` over `cublasGemmEx`. The head is
+    **tied**: `embed_tokens.weight` IS the head weight, so the same 1017 MiB slab serves task 6
+    and task 7 and there is no `lm_head` on disk.
+  - **The column-major mapping, since it is the part that silently misleads.** cuBLAS reads
+    `(i,j)` at `base + i + j*ld`, row-major stores it at `base + i*cols + j` — the same bytes, so
+    a row-major `[M,N]` buffer already *is* a column-major `[N,M]` with `ld = N`, for free.
+    `cublasGemmEx` has `transa`/`transb` but **no `transc`**, so the output's column-major layout
+    is not negotiable and a row-major result can only be had by asking for the transpose with the
+    operands swapped: `logitsT = (h @ tableT)T = table @ hT`. Hence `table` in the A slot with
+    `OP_T`, `h` in the B slot with `OP_N`, `m,n,k = V,T,H`, and `lda/ldb/ldc = H,H,V` — every
+    leading dimension is the row length of **our** buffer, never a dimension of the logical matrix.
+  - `CUBLAS_COMPUTE_32F` (not `_FAST_16BF`, which also licenses TF32). There is no 16-bit compute
+    type for bf16 at all: with 8 mantissa bits, a running sum over `k=2048` stagnates once it
+    exceeds ~256x the next term. `alpha`/`beta` are typed by `computeType` and passed as
+    `const void*` with nothing type-checking them, so they must be host `float` lvalues.
+    **Trap:** a second `cublasGemmEx` overload (`cublas_api.h:5717`) takes `cudaDataType` for
+    `computeType` for legacy code — passing `CUDA_R_32F` by mistake compiles silently and lets
+    `cublasMigrateComputeType` pick pedantic-or-not from the handle's math mode.
+  - **THE bf16 GEMM BUDGET: rel = 2.747e-03** (n 7,449,600, max|d| 0.0625, max|ref| 22.75,
+    worst[168758] -8.75 vs -8.81). Gate set at **5e-3**. Never bit-exact: cuBLAS chooses its own
+    accumulation order. For scale, the bf16-vs-fp32 oracle divergence at `final_norm` is
+    4.106e-03, so the GEMM contributes less error than the two oracle runs differ by.
+  - **argmax matches the dump on all 30 rows.** This is the only check here that can see a
+    layout error: `compareToRef` compares element *count*, so a transposed `[V,T]` holds the same
+    7,449,600 elements and would read as a large-but-finite `rel`, i.e. as a tolerance problem.
+  - Layout proved first at toy scale (`T,H,V = 2,3,4`, all distinct, mostly-identity table) where
+    every value is a small integer and therefore exact in bf16: **rel = 0.000e+00 at tolerance 0**.
+    A tolerance-based check cannot distinguish "slightly wrong summation order" from "slightly
+    wrong matrix"; the exact one can. Do this before uploading a gigabyte.
+  - **Known weakness:** the toy "transposed operands" control trips our own host-side shape
+    validation (`logits.dim(0) != h.dim(0)`) and never reaches cuBLAS, so it duplicates the
+    shape-mismatch check rather than testing the op flag. The brief's "or fail on shape" is
+    satisfied and the bit-exact toy result already proves both flags, but a true op-flag control
+    needs a test-only parameter. Note for 05: `lda >= m` for `OP_N` vs `lda >= k` for `OP_T` makes
+    a flipped flag a hard cuBLAS error *only while* `m != k`; in square-ish attention blocks that
+    free safety net disappears.
+  - `I64ToI32` (`include/utils/helpers.hpp`) guards every int64 -> int narrowing at the cuBLAS
+    boundary: narrowing is silent, so it cannot be caught in a `catch` and must be checked before
+    the cast. Unreachable for this model (max dim 248320) but it makes the cast's safety checkable.
+  - Slow gate: `checkEmbedGather` + `checkTiedHeadReal` both need the 1017 MiB upload and run only
+    under `DELTAFORGE_SLOW_TESTS=1` (PowerShell: `$env:DELTAFORGE_SLOW_TESTS = "1"`; `set` is a
+    Set-Variable alias there and never reaches the child process). Default `ctest` covers the toy
+    head, so the full green table for embed / final-norm / head needs the gate set.
 - pre-flight (2026-09-13): transformers 5.15.1, torch 2.13.0+cu132. `fla`, `causal_conv1d`,
   `kernels` NOT installed → decorator (`integrations/hub_kernels.py:764`) should resolve to the
   torch fallback; still confirm at runtime. Line refs 248 / 554 / 604 / 720-738 verified.
@@ -285,6 +328,11 @@ budget and bf16 GEMM tolerance are recorded as numbers.
     Task 2's C++ `DType` needs `I64` for `ids`; `F32` already exists.
   - `self_attn` / `linear_attn` get `hidden_states` as a **kwarg** (decoder `forward:776`);
     decoder layers get it positionally (`TextModel:1199`). Pre-hooks need `with_kwargs=True`.
+
+## Session milestone: MET (2026-10-29)
+`ctest` is green for embed, final norm and head; both dumps regenerate with one Python
+command; VRAM budget and the bf16 GEMM tolerance are recorded as numbers above.
+Note: the 1 GiB-upload checks need `DELTAFORGE_SLOW_TESTS=1`; plain `ctest` skips them.
 
 ## Handoff (copy up to PROJECT.md when done)
 - Dumper command + tap registry shape; C++ public surface (`SafetensorsFile`, `Tensor`,

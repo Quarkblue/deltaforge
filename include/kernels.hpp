@@ -43,3 +43,7 @@ void embedGather(const Context& ctx, const Tensor& out, const Tensor& table, con
 // the wrong variant must FAIL the comparison, proving the check can see it.
 void rmsNorm(const Context& ctx, const Tensor& out, const Tensor& in, const Tensor& weight,
              float eps, bool unit_offset = true);
+
+
+void tiedHead(const Context& ctx, const Tensor& logits, const Tensor& h, 
+            const Tensor& table);

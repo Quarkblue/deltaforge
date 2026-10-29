@@ -74,6 +74,34 @@ phases, not cut features.
 - **MTP** `mtp.*` — multi-token-prediction / speculative head. Not wired into HF's
   `ForConditionalGeneration` forward, so it's the **last** thing we add.
 
+### Engine surface (built in 04, everything later builds on it)
+- **Loader:** `SafeTensors(path)` — mmap + header parse + name→`TensorView` registry +
+  `__metadata__`; `at/view/getTensors/metadata/sortedNames/dataPtr/dataSize/bindToDevice`.
+  `Model` owns one, uploads the slab into a `DeviceBuffer`, builds typed views.
+  `DType = {BF16, F32, I64}`. Verification lives in `model_checks.hpp`, printing in
+  `manifest.hpp` (`printManifest(os, st, prefix)` — no per-module print code).
+- **Runtime:** `DeviceBuffer` (RAII cudaMalloc/cudaFree, move-only, static alloc/free
+  counters), `Arena` (bump allocator, 256-byte align, `allocTensor`, `reset`, `highWater`),
+  `Tensor` (non-owning device view; `fromView` wraps an uploaded weight), `Context`
+  (cuBLAS handle + own stream + arena, `sync()`), `cuda_check.hpp` / `cublas_check.hpp`.
+- **Kernels:** `include/kernels.hpp` declares host launchers only (tests and `main` are
+  host-compiled and cannot parse `<<<>>>`); `__global__` code stays in `src/kernel.cu`.
+  Launchers validate on the host, queue on `ctx.stream()`, check `cudaGetLastError()`,
+  never synchronise. Done: `embedGather`, `rmsNorm(unit_offset)`, `tiedHead`.
+- **Checking:** `compare.hpp` → `compareToRef` (both sides widened to fp64; `max|d|`,
+  `max|ref|`, `rel`, worst index, NaN/Inf counted not maxed), `compareExactI64`;
+  `deltaforge_test` prints `OK/FAIL/XFAIL/BAD` and returns the failure count.
+  Run: `cmake --build build --config Release` then `ctest --test-dir build -C Release`.
+  **`DELTAFORGE_SLOW_TESTS=1`** additionally runs the 1 GiB embed-table checks.
+
+### Measured tolerances (quote these, don't re-derive)
+- **embed gather: bit-exact** (rel 0.0) · **RMSNorm: bit-exact** (rel 0.0) vs the bf16 dump.
+- **bf16 GEMM (k=2048, fp32 accumulate): rel 2.75e-03** — the budget for every later GEMM.
+- **bf16 vs fp32 oracle runs at `final_norm`: rel 4.11e-03** — end-to-end divergence of the
+  two dumps; a kernel error approaching this is a semantics bug, not rounding.
+- **VRAM at ctx 32768:** weights 4338 MiB + KV 384 MiB + GDN 18.8 MiB + arena 16 MiB +
+  cuBLAS 32 MiB ≈ **4.68 GiB**, ~1.7 GiB headroom. Step scratch measured 1.26 MiB.
+
 ---
 
 ## Phase roadmap
@@ -85,9 +113,9 @@ Status: [ ] todo  [~] in progress  [x] done  (renumbered 2026-09-13, decision 11
       (632 → typed LM/vision/MTP views), single-slab GPU upload. `dump()` + self-checks.
 - [x] **P2. NumPy reference (closed, superseded)** — 01 embed/RMSNorm/head and 02 attention
       done vs HF; 03 stopped before code. Findings live in Target facts.
-- [ ] **P3. Oracle + engine skeleton** — HF bf16 activation dumps (safetensors), CMake
+- [x] **P3. Oracle + engine skeleton** — HF bf16 activation dumps (safetensors), CMake
       lib + `deltaforge_test`, Tensor/arena/cuBLAS context, bf16 helpers, first kernels:
-      embed, RMSNorm, tied head. → brief 04
+      embed, RMSNorm, tied head. → brief 04 **DONE 2026-10-29**
 - [ ] **P4. Full-attention decoder layer, step form** — projections, gated q, QK-norm,
       RoPE, GQA, KV cache, output gate, MLP, residuals. Layers 3 + 7 match. → brief 05
 - [ ] **P5. GatedDeltaNet decoder layer, step form** — projections, conv1d state, gated
@@ -115,6 +143,7 @@ Status: [ ] todo  [~] in progress  [x] done  (renumbered 2026-09-13, decision 11
 | 2026-09-01 | housekeeping | Repo renamed `start-inferencing` → **`deltaforge`**, `git init` + first commit (`2bf0182`). P1 code split out of `main.cpp` into `include/{mapped_file,tensor_view,dtype,model_types,model}.hpp` (+ vendored `json.hpp`); `src/main.cpp` is now just GPU probe + `Model` ctor/selfCheck/dump. `src/kernel.cu` empty placeholder. No P2 work yet. |
 | 2026-09-03 | 01 embed/RMSNorm/head | **P2 slice 1 done.** `python/harness.py`: NumPy-vs-HF harness (`load_raw`/`load_hf`(cached fp32 CPU)/`compare`) + ops `embed`, `rmsnorm`, `tied_head`. All 5 tasks pass — embed & RMSNorm bit-exact, head 1.6e-6, tie proven by shared `data_ptr`. **Trap found:** `Qwen3_5RMSNorm` is zero-centered (`1.0 + weight`, init 0) — all plain norms; the lone exception is `linear_attn.norm` (`RMSNormGated`, plain `w` + silu-gate, F32). bf16→fp32 via torch `framework="pt"`. Next: 02 attention. |
 | 2026-09-13 | 02 attention block | **P2 slice 2 done.** `python/harness_attn.py`: **`attn(x, pos, layer_idx)`** matches HF layer-3 `self_attn` at **4.92e-07** (layer 7: 6.41e-07), budget 1e-3. All 5 stages verified in isolation + 5 negative controls that must XFAIL (naive q/gate split 6.0e0, plain-w norm 7.0e0, rotate-all-256 7.9e0, np.tile KV 3.0e0). `python harness.py` runs 01+02 green. **Refinements:** `rotary_emb` returns `[b,seq,64]` not 3-row mrope — `apply_interleaved_mrope` (modeling:148) collapses it, and that line is the whole P7 hook; `inv_freq` has 32 entries not 64; `self_attn.forward` needs a batch axis; attn-output merge and gate are both head-major and must align. **Trap:** running `harness.py` as `__main__` made `harness_attn`'s `from harness import` load the model a second time (~17 GB) — fixed by aliasing `sys.modules`. Next: 03 MLP + layer assembly. |
+| 2026-10-29 | 04 oracle + skeleton | **P3 done.** `python/dump_oracle.py --dtype bf16\|fp32` → 196-tap dumps (49.1 / 80.2 MiB), all internal checks green, GDN = torch fallback (metadata `gdn_impl`). C++: `SafeTensors` (mmap + header + registry + `__metadata__`), `manifest.hpp` (generic printing), `DeviceBuffer`/`Arena`/`Tensor`/`Context`, `bf16.hpp`, `compare.hpp`, `model_checks.hpp`; CMake split into `deltaforge_core` + `infer` + `deltaforge_test` + CTest (red proven). **Kernels: embed and RMSNorm bit-exact vs the dump; tied head rel 2.747e-03 with argmax matching on all 30 rows.** Arena: 10k resets = 0 allocations, step high-water 1.26 MiB. ctx 32768 → 4.68 GiB total. Next: brief 05. |
 | 2026-09-13 | 03 stopped → pivot | **NumPy-first retired** (decision 11): too slow for the value; the bugs were caught by per-stage HF comparison, not by the reimplementation. 03 stopped after pre-flight, which caught two brief errors (KV = 24 KiB/token fp32 not 12; 6144 = 3×2048 not 8/3×2048) and two harness traps (square causal mask only correct for S_q=1; shared failure list). Roadmap renumbered: P3 oracle+skeleton → P6 text bring-up (5 sessions + tokenizer). Next: brief 04. |
 
 ---
@@ -167,6 +196,19 @@ Status: [ ] todo  [~] in progress  [x] done  (renumbered 2026-09-13, decision 11
     controls carry over from decision 9. (2026-09-13)
 16. **Briefs tag research as *gating* or *optional*;** only gating items block a milestone.
     Each brief carries all known traps forward. (2026-09-13)
+17. **Rule of zero for every resource.** `MappedFile`, `DeviceBuffer` (and later the cuBLAS
+    handle/stream) own one thing each and free it in their destructor; owners like `Model`
+    hold them by value, declare no destructor, and delete copying. No `new`/`delete`, and
+    never an explicit `~T()` call. (2026-10-03)
+18. **Every kernel ships a negative control AND a hand-computable toy case.** The control
+    (wrong variant must XFAIL) proves the check can see the bug; the toy case (e.g. the
+    `2x3 @ (4x3)^T` head) proves the index/layout mapping independent of the model, so a
+    GEMM failure separates "my lda is wrong" from "my weights are wrong". (2026-10-29)
+19. **`compare` is relative and fp64.** Tolerances are `max|d| / max|ref|`; NaN/Inf
+    disagreement can never be forgiven by a tolerance. Known gap to close in 05:
+    `compareToRef` checks element *count*, not shape, so a transposed output
+    (`[8,T,256]` vs `[T,8,256]`) would pass — add per-dim checking before the attention
+    layout work. (2026-10-29)
 
 ---
 
@@ -175,5 +217,6 @@ Status: [ ] todo  [~] in progress  [x] done  (renumbered 2026-09-13, decision 11
 - `docs/sessions/01-embed-rmsnorm.md` — NumPy harness + embed/RMSNorm/tied head (P2). **DONE 2026-09-03.**
 - `docs/sessions/02-attention-block.md` — NumPy full-attention sub-block (P2). **DONE 2026-09-13.**
 - `docs/sessions/03-mlp-decoder-layer.md` — **STOPPED 2026-09-13** (pivot). Pre-flight notes harvested into facts + brief 05.
-- `docs/sessions/04-oracle-skeleton.md` — HF bf16 dumps + engine skeleton + test runner + embed/RMSNorm/head kernels (P3). **NEXT.**
-- (queued) 05 full-attn layer step form (P4) · 06 GDN projections/conv/gated norm · 07 GDN delta-rule step (P5) · 08 text bring-up (P6) · 09 tokenizer (P6.5, any time) · 10 speed (P7).
+- `docs/sessions/04-oracle-skeleton.md` — HF bf16 dumps + engine skeleton + test runner + embed/RMSNorm/head kernels (P3). **DONE 2026-10-29.**
+- (next) 05 full-attn layer step form (P4) — taps already in the dump: `input_norm`, `q_proj`, `q`, `gate`, `k`, `v`, `q_normed`, `k_normed`, `q_roped`, `k_roped`, `core_out`, `gated`, `mixer_out`, `resid1`, `post_norm`, `mlp_out`, `cache.k`, `cache.v` for layers 3/7/11/15/19/23.
+- (queued) 06 GDN projections/conv/gated norm · 07 GDN delta-rule step (P5) · 08 text bring-up (P6) · 09 tokenizer (P6.5, any time) · 10 speed (P7).

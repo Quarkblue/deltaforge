@@ -610,6 +610,116 @@ void checkRMSNorm() {
     expect_differs("rmsnorm: control -- plain w (no 1+) does not match", ctx, out_plain, dump.at("final_norm"), 1e-5);
 }
 
+void checkTiedHead() {
+    const int64_t T = 2, H = 3, V = 4;
+
+    const float h_f[T * H] = {1,2,3,
+                                4, 5, 6};
+
+    const float tab_f[V * H] = {1, 0, 0,
+                                0, 1, 0,
+                                0, 0, 1,
+                                1, 1, 1};
+
+    const float want_f[T * V] = {1, 2, 3,  6,
+                                4, 5, 6,  15};
+
+    uint16_t h_b[T * H], tab_b[V * H], want_b[T * V];
+    for (int i = 0; i < T * H; ++i) h_b[i]    = f32_to_bf16(h_f[i]);
+    for (int i = 0; i < V * H; ++i) tab_b[i]  = f32_to_bf16(tab_f[i]);
+    for (int i = 0; i < T * V; ++i) want_b[i] = f32_to_bf16(want_f[i]);
+
+    Arena a(1 << 20);
+    Context ctx(a);
+
+    Tensor h = uploadBytes(a, h_b, DType::BF16, {T, H});
+    Tensor table = uploadBytes(a, tab_b, DType::BF16, {V, H});
+    Tensor logits = a.allocTensor(DType::BF16, {T, V});
+    CUDA_CHECK(cudaMemset(logits.data, 0xFF, logits.nbytes()));
+
+    tiedHead(ctx, logits, h, table);
+    compare("head/toy: 2x3 @ (4x3)T is bit-exact", ctx, logits, hostView(want_b, DType::BF16, {T, V}), 0.0);
+
+    Tensor bad = a.allocTensor(DType::BF16, {V, T});
+
+    check("head/toy: control -- transposed operands are rejected", threw([&] { tiedHead(ctx, bad, h, table); }));
+    check("head/toy: rejects a non-BF16 logits",
+        threw([&] { tiedHead(ctx, a.allocTensor(DType::F32, {T, V}), h, table); }));
+    check("head/toy: rejects a hidden-size mismatch",
+        threw([&] { tiedHead(ctx, logits, h, a.allocTensor(DType::BF16, {V, H + 1})); }));
+}
+
+
+// Task 7 at real scale: the calibration that fixes the bf16 GEMM tolerance every
+// later brief inherits. Behind the slow gate -- it uploads the 1017 MiB table.
+void checkTiedHeadReal() {
+    SafeTensors shard(modelPath(MODEL_NAME + L"/model.safetensors-00001-of-00001.safetensors"));
+    shard.loadTensorsToViews();
+    const TensorView& table_view = shard.at("model.language_model.embed_tokens.weight");
+    check("head: table is BF16 [248320, 2048]", hasShape(table_view, {248320, 2048}, DType::BF16));
+
+    SafeTensors dump(dumpPath(L"oracle_bf16.safetensors"));
+    dump.loadTensorsToViews();
+    const TensorView& h_view = dump.at("final_norm");
+    const TensorView& ref_view = dump.at("logits");
+    const int64_t T = h_view.shape[0], H = h_view.shape[1], V = table_view.shape[0];
+    check("head: h is BF16 [30, 2048]", hasShape(h_view, {30, 2048}, DType::BF16));
+    check("head: logits ref is BF16 [30, 248320]", hasShape(ref_view, {T, V}, DType::BF16));
+
+    Arena a(32 << 20);  // logits alone is T*V*2 = 14.2 MiB
+    Context ctx(a);
+
+    const size_t frees_before = DeviceBuffer::getFreeCount();
+    {
+        // This table is the embedding table AND the tied head weight. 1017 MiB, so
+        // it gets its own buffer rather than the per-step arena.
+        DeviceBuffer table_buffer(table_view.nbytes);
+        table_buffer.upload(table_view.host_ptr, table_view.nbytes);
+        Tensor table(table_buffer.getDevicePtr(), table_view.dtype, table_view.shape, table_view.ndim);
+
+        Tensor h = uploadBytes(a, h_view.host_ptr, DType::BF16, {T, H});
+        Tensor logits = a.allocTensor(DType::BF16, {T, V});
+
+        // beta == 0 means cuBLAS never reads C, so poisoning is safe here and still
+        // catches a GEMM that did not run: every element would stay NaN, and
+        // CompareResult::within() refuses to forgive nan_one.
+        CUDA_CHECK(cudaMemset(logits.data, 0xFF, logits.nbytes()));
+
+        tiedHead(ctx, logits, h, table);
+
+        // THE bf16 GEMM BUDGET. Measured 2026-10-29: rel = 2.747e-03 (max|d| 0.0625,
+        // max|ref| 22.75, worst[168758] -8.75 vs -8.81). Gate set to the next round
+        // number above it. Not bit-exact and never will be: cuBLAS chooses its own
+        // accumulation order over k=2048. Every later stage inherits this budget, so
+        // if this number moves, something changed in the GEMM path -- not in tolerance.
+        compare("head: logits vs the dump", ctx, logits, ref_view, 5e-3);
+
+        // argmax is the check a tolerance cannot make, and the only one here that
+        // would notice a transposed [V, T] result: compareToRef compares element
+        // COUNT, not shape, and both layouts hold the same 7,449,600 elements.
+        ctx.sync();
+        std::vector<uint8_t> mine(logits.nbytes());
+        CUDA_CHECK(cudaMemcpy(mine.data(), logits.data, logits.nbytes(), cudaMemcpyDeviceToHost));
+
+        size_t argmax_mismatch = 0;
+        for (int64_t t = 0; t < T; ++t) {
+            int64_t best_mine = 0, best_ref = 0;
+            double val_mine = -1e300, val_ref = -1e300;
+            for (int64_t v = 0; v < V; ++v) {
+                const size_t i = static_cast<size_t>(t) * static_cast<size_t>(V) + static_cast<size_t>(v);
+                const double m = elemAsDouble(mine.data(), DType::BF16, i);
+                const double r = elemAsDouble(ref_view.host_ptr, DType::BF16, i);
+                if (m > val_mine) { val_mine = m; best_mine = v; }
+                if (r > val_ref) { val_ref = r; best_ref = v; }
+            }
+            argmax_mismatch += (best_mine != best_ref);
+        }
+        check("head: argmax matches the dump on all 30 rows", argmax_mismatch == 0);
+    }  // table_buffer's destructor runs HERE
+
+    check("head: the table buffer was freed", DeviceBuffer::getFreeCount() == frees_before + 1);
+}
+
 }  // namespace
 
 int main() {
@@ -625,13 +735,15 @@ int main() {
         checkArenaReuse();
         checkCompare();
         checkKernelPlumbing();
+        checkTiedHead();
+        checkRMSNorm();
         if(deltaforge_slow_tests != nullptr && std::string(deltaforge_slow_tests) == "1"){
             std::cout << "Running slow tests" << std::endl;
             checkEmbedGather();
+            checkTiedHeadReal();
         }else {
             std::cout << "Skipping slow tests" << std::endl;
         }
-        checkRMSNorm();
     } catch (const std::exception& e) {
         std::cerr << "unexpected exception: " << e.what() << '\n';
         return 1;

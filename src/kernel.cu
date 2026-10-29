@@ -2,10 +2,11 @@
 #include "cuda_check.hpp"
 #include "bf16.hpp"
 #include "context.hpp"
+#include "cublas_check.hpp"
+#include "utils/helpers.hpp"
 
 #include <cstdint>
 #include <stdexcept>
-#include <string>
 #include <cuda_bf16.h>
 
 namespace {
@@ -121,4 +122,47 @@ void rmsNorm(const Context& ctx, const Tensor& out, const Tensor& in, const Tens
 
     rmsNormKernel<<<blocks, threads, 0, ctx.stream()>>>(out_p, in_p, w_p, rows, cols, eps, unit_offset);
     CUDA_CHECK(cudaGetLastError());
+}
+
+void tiedHead(const Context& ctx, const Tensor& logits, const Tensor& h, const Tensor& table) {
+    if (logits.dtype != DType::BF16 || h.dtype != DType::BF16 || table.dtype != DType::BF16) {
+        throw std::runtime_error("tiedHead: logits, h, and table should be BF16");
+    }
+    if (logits.ndim != 2 || h.ndim != 2 || table.ndim != 2) {
+        throw std::runtime_error("tiedHead: all three should be 2-D");
+    }
+    if (h.dim(1) != table.dim(1)) {
+        throw std::runtime_error("tiedHead: h.dim[1] != table.dim[1]");
+    }
+    if (logits.dim(0) != h.dim(0)) {
+        throw std::runtime_error("tiedHead: logits.dim[0] != h.dim[0]");
+    }
+    if (logits.dim(1) != table.dim(0)) {
+        throw std::runtime_error("tiedHead: logits.dim[1] != table.dim[0]");
+    }
+
+    const int64_t T64 = h.dim(0), H64 = h.dim(1), V64 = table.dim(0);
+    int T, H, V;
+    if(!I64ToI32(T64, T) || !I64ToI32(H64, H) || !I64ToI32(V64, V)) {
+        throw std::runtime_error("tiedHead: dimensions larger than INT32_MAX");
+    }
+
+    const float alpha = 1.0f;
+    const float beta = 0.0f;
+
+    CUBLAS_CHECK(
+        cublasGemmEx(
+            ctx.cublas(),
+            CUBLAS_OP_T,
+            CUBLAS_OP_N,
+            V, T, H,
+            &alpha,
+            table.data, CUDA_R_16BF, H,
+            h.data, CUDA_R_16BF, H,
+            &beta,
+            logits.data, CUDA_R_16BF, V,
+            CUBLAS_COMPUTE_32F,
+            CUBLAS_GEMM_DEFAULT
+        )
+    );
 }
